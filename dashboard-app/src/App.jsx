@@ -6,9 +6,13 @@ import {
   Button,
   Chip,
   Container,
+  Dialog,
+  DialogContent,
+  DialogTitle,
   Divider,
   FormControl,
   Grid,
+  IconButton,
   InputAdornment,
   InputLabel,
   MenuItem,
@@ -35,6 +39,7 @@ import InsightsRoundedIcon from '@mui/icons-material/InsightsRounded'
 import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded'
 import ReportProblemRoundedIcon from '@mui/icons-material/ReportProblemRounded'
 import RestartAltRoundedIcon from '@mui/icons-material/RestartAltRounded'
+import CloseRoundedIcon from '@mui/icons-material/CloseRounded'
 import SearchRoundedIcon from '@mui/icons-material/SearchRounded'
 import UploadFileRoundedIcon from '@mui/icons-material/UploadFileRounded'
 import './App.css'
@@ -62,6 +67,8 @@ const HEADER_CANDIDATES = {
     'id',
     'userid',
     'personid',
+    'personnumber',
+    'personno',
     'associateid',
     'associatecode',
     'resourceid',
@@ -97,6 +104,12 @@ const HEADER_CANDIDATES = {
     'heldlevel',
     'currentlevel',
     'acquiredlevel',
+    'highestlevelacquired',
+    'highestlevelheld',
+    'highestcompetencylevel',
+    'currentcompetencylevel',
+    'competencyacquired',
+    'competencyheld',
     'competencylevel',
     'proficiencylevel',
     'level',
@@ -268,35 +281,48 @@ function normalizePortfolioName(value) {
     return 'Unmapped'
   }
 
-  const lowerPortfolio = portfolio.toLowerCase()
-  const searchable = lowerPortfolio
-    .replace(/&/g, ' and ')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim()
-  const compact = searchable.replace(/\s+/g, '')
+  // Compact, lowercase, alphanumeric-only key for matching variants
+  // (handles "C&H", " - ", extra spaces, casing, etc.)
+  const compact = portfolio
+    .toLowerCase()
+    .replace(/&/g, 'and')
+    .replace(/[^a-z0-9]+/g, '')
 
-  if (compact === 'bps' || compact.startsWith('bps')) {
+  // C&H Commercial Trading + C&H E2E Planning -> "C&H Commercial Trading/E2E Planning"
+  if (
+    compact === 'candhcommercialtrading' ||
+    compact === 'candhe2eplanning' ||
+    compact === 'chcommercialtrading' ||
+    compact === 'che2eplanning'
+  ) {
+    return 'C&H Commercial Trading/E2E Planning'
+  }
+
+  // Retail + Retail - RTS -> "Retail"
+  if (compact === 'retail' || compact === 'retailrts') {
+    return 'Retail'
+  }
+
+  // BPS + BPS-DOS -> "BPS"
+  if (compact === 'bps' || compact === 'bpsdos') {
     return 'BPS'
   }
 
-  if (lowerPortfolio.includes('c&h') || compact.startsWith('candh')) {
-    return 'C&H'
-  }
-
-  if (searchable.includes('customer')) {
-    return 'Customer Engagement'
-  }
-
-  if (compact === 'data' || compact === 'datacentre' || compact === 'datacenter') {
-    return 'Data & Datacentre'
-  }
-
-  if (compact === 'dwa' || compact === 'dws') {
-    return 'DWA/DWS'
-  }
-
-  if (searchable.startsWith('retail')) {
-    return 'Retail'
+  // Roll these portfolios into "Others"
+  const othersKeys = new Set([
+    'dws',
+    'serviceassurancepractice',
+    'cis',
+    'certificatemanagementassessmentphase',
+    'certificatemgmtassessmentphase',
+    'cybersecurity',
+    'dwa',
+    'operatingsecurelyprogram',
+    'customer',
+    'customeroando', // "Customer O&O"
+  ])
+  if (othersKeys.has(compact)) {
+    return 'Others'
   }
 
   return portfolio
@@ -460,6 +486,80 @@ function createBlankStatusMap() {
   )
 }
 
+// Tokens we expect to see in a real header row. Used to score candidate header
+// rows when reports include title/metadata rows above the actual table
+// (common in TCS / HR exports such as the E2+ competency report).
+const HEADER_DETECTION_TOKENS = [
+  'employeeid',
+  'employee',
+  'employeenumber',
+  'empid',
+  'colleagueid',
+  'personnumber',
+  'associateid',
+  'employeename',
+  'name',
+  'fullname',
+  'portfolio',
+  'department',
+  'offdo',
+  'status',
+  'heldlevel',
+  'acquiredlevel',
+  'currentlevel',
+  'competencylevel',
+  'level',
+  'compliance',
+  'compliant',
+  'iscompliant',
+  'completionstatus',
+  'coursecompletionstatus',
+  'trainingstatus',
+]
+
+function detectHeaderRowIndex(matrix) {
+  const limit = Math.min(matrix.length, 30)
+  let bestIndex = 0
+  let bestScore = -1
+
+  for (let i = 0; i < limit; i++) {
+    const row = matrix[i] || []
+    const normalizedCells = row.map((cell) => normalizeKey(cell))
+    const nonEmptyCount = normalizedCells.filter((cell) => cell).length
+
+    // A header row should have at least a couple of populated columns.
+    if (nonEmptyCount < 2) {
+      continue
+    }
+
+    let score = 0
+    for (const cell of normalizedCells) {
+      if (!cell) continue
+      for (const token of HEADER_DETECTION_TOKENS) {
+        if (cell === token) {
+          score += 3
+          break
+        }
+        if (cell.includes(token)) {
+          score += 1
+          break
+        }
+      }
+    }
+
+    // Mild bonus for wider rows so a real header beats a stray metadata line
+    // that happens to contain one matching word.
+    score += Math.min(nonEmptyCount, 12) * 0.1
+
+    if (score > bestScore) {
+      bestScore = score
+      bestIndex = i
+    }
+  }
+
+  return bestIndex
+}
+
 async function parseRowsFromFile(file) {
   const arrayBuffer = await file.arrayBuffer()
   const workbook = XLSX.read(arrayBuffer, { type: 'array', cellDates: false })
@@ -469,10 +569,60 @@ async function parseRowsFromFile(file) {
   }
 
   const worksheet = workbook.Sheets[firstSheetName]
-  return XLSX.utils.sheet_to_json(worksheet, {
+
+  // Read as a 2D array first so we can locate the real header row even when
+  // the sheet starts with title/metadata/filter rows above the table.
+  const matrix = XLSX.utils.sheet_to_json(worksheet, {
+    header: 1,
     defval: '',
     raw: false,
+    blankrows: false,
   })
+
+  if (!matrix.length) {
+    return []
+  }
+
+  const headerRowIndex = detectHeaderRowIndex(matrix)
+  const headerRow = matrix[headerRowIndex] || []
+
+  // Build unique, non-empty header names. Empty cells get a synthetic label so
+  // they don't collapse together; duplicates get a numeric suffix.
+  const headers = []
+  const seen = new Map()
+  headerRow.forEach((cell, columnIndex) => {
+    let name = normalizeCellValue(cell)
+    if (!name) {
+      name = `Column ${columnIndex + 1}`
+    }
+    const baseName = name
+    let suffix = seen.get(baseName) || 0
+    while (seen.has(name)) {
+      suffix += 1
+      name = `${baseName} (${suffix})`
+    }
+    seen.set(baseName, suffix)
+    seen.set(name, 0)
+    headers.push(name)
+  })
+
+  const rows = []
+  for (let i = headerRowIndex + 1; i < matrix.length; i++) {
+    const row = matrix[i]
+    if (!row) continue
+    const isBlank = headers.every(
+      (_, idx) => normalizeCellValue(row[idx]) === '',
+    )
+    if (isBlank) continue
+
+    const rowObject = {}
+    headers.forEach((header, idx) => {
+      rowObject[header] = row[idx] ?? ''
+    })
+    rows.push(rowObject)
+  }
+
+  return rows
 }
 
 async function parseHcMap(file, label) {
@@ -486,6 +636,11 @@ async function parseHcMap(file, label) {
   const hcNameHeader = findHeaderByCandidates(
     hcHeaders,
     HEADER_CANDIDATES.employeeName,
+  )
+  const hcOffDoHeader = findHeaderByCandidates(
+    hcHeaders,
+    ['offdo'],
+    { exactOnlyCandidates: ['offdo'] },
   )
 
   if (!hcIdHeader || !hcPortfolioHeader) {
@@ -504,10 +659,32 @@ async function parseHcMap(file, label) {
       portfolio: normalizePortfolioName(row[hcPortfolioHeader]),
       employeeName:
         normalizeCellValue(row[hcNameHeader]) || map[employeeId]?.employeeName || '-',
+      offDo: hcOffDoHeader
+        ? normalizeCellValue(row[hcOffDoHeader])
+        : '',
     }
 
     return map
   }, {})
+}
+
+function buildPortfolioOffDoMap(hcMaps) {
+  const result = {}
+  const sources = [hcMaps.current, hcMaps.previous]
+  sources.forEach((source) => {
+    if (!source) return
+    Object.values(source).forEach((entry) => {
+      const portfolio = entry?.portfolio
+      const offDo = entry?.offDo
+      if (!portfolio || !offDo) return
+      // 'Others' is a catch-all bucket; never assign it an Off Do.
+      if (portfolio === 'Others') return
+      if (!result[portfolio]) {
+        result[portfolio] = offDo
+      }
+    })
+  })
+  return result
 }
 
 function refreshEmployeePortfolio(employee) {
@@ -634,6 +811,12 @@ function App() {
   const [selectedPortfolio, setSelectedPortfolio] = useState('All')
   const [errorText, setErrorText] = useState('')
   const [loading, setLoading] = useState(false)
+  const [missingHcDialogOpen, setMissingHcDialogOpen] = useState(false)
+  const [missingHcDialogPeriod, setMissingHcDialogPeriod] = useState('current')
+  const [portfolioDialogOpen, setPortfolioDialogOpen] = useState(false)
+  const [portfolioDialogPeriod, setPortfolioDialogPeriod] = useState('current')
+  const [portfolioViewMode, setPortfolioViewMode] = useState('matrix')
+  const [activePortfolioForEmployees, setActivePortfolioForEmployees] = useState(null)
   const debounceTimer = useRef(null)
 
   useEffect(() => {
@@ -680,10 +863,98 @@ function App() {
       rows = rows.filter((row) => row.portfolio === selectedPortfolio)
     }
 
-    return sortPortfoliosByPriority(rows.map((r) => r.portfolio)).map((portfolio) =>
-      rows.find((r) => r.portfolio === portfolio),
-    )
+    // Preserve order from dashboardData.portfolioRows so Off Do groups remain contiguous.
+    return rows
   }, [dashboardData, selectedPortfolio])
+
+  const offDoGroupInfo = useMemo(() => {
+    const sizes = {}
+    filteredPortfolioRows.forEach((row) => {
+      // 'Others' rows always stand alone — never bucketed under any Off Do.
+      if (row.portfolio === 'Others') return
+      const key = row.offDo || '-'
+      sizes[key] = (sizes[key] || 0) + 1
+    })
+
+    const seen = new Set()
+    return filteredPortfolioRows.map((row, idx) => {
+      if (row.portfolio === 'Others') {
+        return {
+          row,
+          offDoKey: `__others__${idx}`,
+          isFirstInGroup: true,
+          groupSize: 1,
+        }
+      }
+
+      const key = row.offDo || '-'
+      const isFirstInGroup = !seen.has(key)
+      if (isFirstInGroup) seen.add(key)
+      return {
+        row,
+        offDoKey: key,
+        isFirstInGroup,
+        groupSize: sizes[key],
+      }
+    })
+  }, [filteredPortfolioRows])
+
+  const portfolioSummaryRows = useMemo(() => {
+    if (!dashboardData?.employees?.length || !filteredPortfolioRows.length) {
+      return []
+    }
+
+    const employees = dashboardData.employees
+    const hasPrevious = dashboardData.hasPrevious
+
+    return filteredPortfolioRows.map((row) => {
+      const portfolio = row.portfolio
+
+      const currentTotal = employees.filter(
+        (employee) => employee.portfolios.current === portfolio,
+      ).length
+      const currentDefaulters = employees.filter(
+        (employee) =>
+          employee.portfolios.current === portfolio &&
+          COURSES.some(
+            (course) => employee.statuses[course.key].current === 'Defaulter',
+          ),
+      ).length
+
+      const previousTotal = hasPrevious
+        ? employees.filter(
+            (employee) => employee.portfolios.previous === portfolio,
+          ).length
+        : null
+      const previousDefaulters = hasPrevious
+        ? employees.filter(
+            (employee) =>
+              employee.portfolios.previous === portfolio &&
+              COURSES.some(
+                (course) => employee.statuses[course.key].previous === 'Defaulter',
+              ),
+          ).length
+        : null
+
+      const currentPercent =
+        currentTotal > 0 ? (currentDefaulters / currentTotal) * 100 : 0
+      const previousPercent =
+        hasPrevious && previousTotal > 0
+          ? (previousDefaulters / previousTotal) * 100
+          : null
+
+      return {
+        portfolio,
+        offDo: row.offDo,
+        previousTotal,
+        previousDefaulters,
+        previousPercent,
+        currentTotal,
+        currentDefaulters,
+        currentPercent,
+      }
+    })
+  }, [dashboardData, filteredPortfolioRows])
 
   const employeePool = useMemo(() => {
     if (!dashboardData?.employees) {
@@ -709,27 +980,36 @@ function App() {
     [debouncedSearchQuery],
   )
 
-  const filteredEmployeeRows = useMemo(() => {
-    if (!employeePool.length) {
+  const portfolioEmployeeRows = useMemo(() => {
+    if (!dashboardData?.employees?.length || !activePortfolioForEmployees) {
       return []
     }
 
+    const portfolioEmployees = dashboardData.employees.filter(
+      (employee) =>
+        employee.portfolios.current === activePortfolioForEmployees ||
+        employee.portfolios.previous === activePortfolioForEmployees ||
+        employee.portfolio === activePortfolioForEmployees,
+    )
+
     if (!debouncedSearchQuery) {
-      return employeePool.slice(0, 50)
+      return portfolioEmployees.slice(0, MAX_EMPLOYEE_RESULTS)
     }
 
-    return employeePool
+    return portfolioEmployees
       .filter((employee) => {
-        const byId = employee.employeeId
-          .toLowerCase()
-          .includes(normalizedSearchId)
-        const byName = employee.employeeName
-          .toLowerCase()
-          .includes(normalizedSearch)
+        const byId = employee.employeeId.toLowerCase().includes(normalizedSearchId)
+        const byName = employee.employeeName.toLowerCase().includes(normalizedSearch)
         return byId || byName
       })
       .slice(0, MAX_EMPLOYEE_RESULTS)
-  }, [employeePool, normalizedSearch, normalizedSearchId, debouncedSearchQuery])
+  }, [
+    activePortfolioForEmployees,
+    dashboardData,
+    debouncedSearchQuery,
+    normalizedSearch,
+    normalizedSearchId,
+  ])
 
   const exactEmployeeMatch = useMemo(() => {
     if (!normalizedSearchId || !employeePool.length) {
@@ -742,26 +1022,6 @@ function App() {
       ) || null
     )
   }, [employeePool, normalizedSearchId])
-
-  const hasMoreSearchResults = useMemo(() => {
-    if (!debouncedSearchQuery) {
-      return employeePool.length > 50
-    }
-
-    const totalMatches = employeePool.filter((employee) => {
-      const byId = employee.employeeId
-        .toLowerCase()
-        .includes(normalizedSearchId)
-      const byName = employee.employeeName
-        .toLowerCase()
-        .includes(normalizedSearch)
-      return byId || byName
-    }).length
-
-    return totalMatches > filteredEmployeeRows.length
-  }, [employeePool, filteredEmployeeRows.length, normalizedSearch, normalizedSearchId, debouncedSearchQuery])
-
-
 
   function updateCourseFile(period, courseKey, file) {
     setErrorText('')
@@ -783,7 +1043,7 @@ function App() {
     setErrorText('')
 
     if (file && !ensureExcelFile(file)) {
-      setErrorText('HC file must be an Excel file (.xlsx, .xls, .xlsm).')
+      setErrorText('Headcount file must be an Excel file (.xlsx, .xls, .xlsm).')
       return
     }
 
@@ -797,6 +1057,7 @@ function App() {
     setDashboardData(null)
     setSearchQuery('')
     setSelectedPortfolio('All')
+    setActivePortfolioForEmployees(null)
     setErrorText('')
   }
 
@@ -810,7 +1071,7 @@ function App() {
     }
 
     if (!hcFiles.current) {
-      setErrorText('Upload the Current HC Count file before processing.')
+      setErrorText('Upload the Current Headcount file before processing.')
       return
     }
 
@@ -826,16 +1087,17 @@ function App() {
     setLoading(true)
 
     try {
-      const currentHcMap = await parseHcMap(hcFiles.current, 'Current HC Count file')
+      const currentHcMap = await parseHcMap(hcFiles.current, 'Current Headcount file')
       const hcMaps = {
         current: currentHcMap,
         previous:
           hasPrevious && hcFiles.previous
-            ? await parseHcMap(hcFiles.previous, 'Previous HC Count file')
+            ? await parseHcMap(hcFiles.previous, 'Previous Headcount file')
             : hasPrevious
               ? currentHcMap
               : {},
       }
+      const portfolioOffDoMap = buildPortfolioOffDoMap(hcMaps)
       const employeeMap = {}
 
       Object.entries(hcMaps.current).forEach(([employeeId, hcEntry]) => {
@@ -894,8 +1156,13 @@ function App() {
         )
 
         if (!idHeader || !statusHeader) {
+          const missing = []
+          if (!idHeader) missing.push('Employee ID')
+          if (!statusHeader) missing.push('Status')
+          const detectedHeaders = headers.filter((h) => h && !/^Column \d+$/.test(h))
           throw new Error(
-            `Unable to detect required columns in ${item.file.name}. Ensure Employee ID and status columns are present.`,
+            `Unable to detect ${missing.join(' and ')} column${missing.length > 1 ? 's' : ''} in ${item.file.name}. ` +
+              `Detected columns: ${detectedHeaders.length ? detectedHeaders.join(', ') : '(none)'}.`,
           )
         }
 
@@ -1001,7 +1268,11 @@ function App() {
             }
           })
 
-          return { portfolio, counts }
+          return {
+            portfolio,
+            counts,
+            offDo: portfolioOffDoMap[portfolio] || '-',
+          }
         })
         .filter((row) =>
           COURSES.some((course) => {
@@ -1015,6 +1286,15 @@ function App() {
           }),
         )
         .sort((a, b) => {
+          const aHasOffDo = a.offDo && a.offDo !== '-'
+          const bHasOffDo = b.offDo && b.offDo !== '-'
+
+          if (aHasOffDo && !bHasOffDo) return -1
+          if (!aHasOffDo && bHasOffDo) return 1
+          if (aHasOffDo && bHasOffDo && a.offDo !== b.offDo) {
+            return a.offDo.localeCompare(b.offDo)
+          }
+
           const aIsMajor = MAJOR_PORTFOLIOS.includes(a.portfolio)
           const bIsMajor = MAJOR_PORTFOLIOS.includes(b.portfolio)
 
@@ -1049,11 +1329,14 @@ function App() {
             ...missingFromHcIds.current,
             ...(hasPrevious ? missingFromHcIds.previous : []),
           ]).size,
+          currentIds: Array.from(missingFromHcIds.current).sort(),
+          previousIds: hasPrevious ? Array.from(missingFromHcIds.previous).sort() : [],
         },
         processedAt: new Date().toISOString(),
       })
 
       setSelectedPortfolio('All')
+      setActivePortfolioForEmployees(null)
     } catch (error) {
       setDashboardData(null)
       setErrorText(error.message || 'Failed to parse uploaded files.')
@@ -1069,6 +1352,7 @@ function App() {
     }
 
     const header = [
+      'Off Do',
       'Portfolio',
       'Secuware (Prev)',
       'Secuware (Curr)',
@@ -1081,6 +1365,7 @@ function App() {
     ]
 
     const rows = dashboardData.portfolioRows.map((row) => [
+      row.offDo || '-',
       row.portfolio,
       row.counts.secuware.previous ?? '-',
       row.counts.secuware.current ?? '-',
@@ -1096,6 +1381,113 @@ function App() {
     const workbook = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Defaulter Dashboard')
     XLSX.writeFile(workbook, `defaulter-dashboard-${Date.now()}.xlsx`)
+  }
+
+  function exportPortfolioSummary() {
+    if (!dashboardData?.portfolioRows?.length) {
+      setErrorText('Process files first to export dashboard data.')
+      return
+    }
+
+    const employees = dashboardData.employees
+    const hasPrevious = dashboardData.hasPrevious
+
+    const summary = dashboardData.portfolioRows.map((row) => {
+      const portfolio = row.portfolio
+      const offDo = row.offDo || '-'
+
+      const currentTotal = employees.filter(
+        (employee) => employee.portfolios.current === portfolio,
+      ).length
+      const currentDefaulters = employees.filter(
+        (employee) =>
+          employee.portfolios.current === portfolio &&
+          COURSES.some(
+            (course) => employee.statuses[course.key].current === 'Defaulter',
+          ),
+      ).length
+
+      const previousTotal = hasPrevious
+        ? employees.filter(
+            (employee) => employee.portfolios.previous === portfolio,
+          ).length
+        : null
+      const previousDefaulters = hasPrevious
+        ? employees.filter(
+            (employee) =>
+              employee.portfolios.previous === portfolio &&
+              COURSES.some(
+                (course) => employee.statuses[course.key].previous === 'Defaulter',
+              ),
+          ).length
+        : null
+
+      const currentPercent =
+        currentTotal > 0 ? (currentDefaulters / currentTotal) * 100 : 0
+      const previousPercent =
+        hasPrevious && previousTotal !== null && previousTotal > 0
+          ? (previousDefaulters / previousTotal) * 100
+          : null
+
+      return {
+        offDo,
+        portfolio,
+        previousTotal,
+        previousDefaulters,
+        previousPercent,
+        currentTotal,
+        currentDefaulters,
+        currentPercent,
+      }
+    })
+
+    const header = hasPrevious
+      ? [
+          'Off Do',
+          'Portfolio',
+          'Total Employees (Prev)',
+          'Total Employees (Curr)',
+          'Total Defaulters (Prev)',
+          'Total Defaulters (Curr)',
+          'Defaulter % (Prev)',
+          'Defaulter % (Curr)',
+        ]
+      : [
+          'Off Do',
+          'Portfolio',
+          'Total Employees',
+          'Total Defaulters',
+          'Defaulter %',
+        ]
+
+    const formatPercent = (value) =>
+      value === null || value === undefined ? '-' : `${value.toFixed(2)}%`
+
+    const rows = summary.map((row) =>
+      hasPrevious
+        ? [
+            row.offDo,
+            row.portfolio,
+            row.previousTotal ?? '-',
+            row.currentTotal,
+            row.previousDefaulters ?? '-',
+            row.currentDefaulters,
+            formatPercent(row.previousPercent),
+            formatPercent(row.currentPercent),
+          ]
+        : [
+            row.offDo,
+            row.portfolio,
+            row.currentTotal,
+            row.currentDefaulters,
+            formatPercent(row.currentPercent),
+          ],
+    )
+
+    const worksheet = XLSX.utils.aoa_to_sheet([header, ...rows])
+    const workbook = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Portfolio Summary')
+    XLSX.writeFile(workbook, `portfolio-defaulter-summary-${Date.now()}.xlsx`)
   }
 
   const stats = useMemo(() => {
@@ -1125,9 +1517,9 @@ function App() {
 
   return (
     <ThemeProvider theme={theme}>
-      <Box className="dashboard-shell">
-        <Container maxWidth="xl" className="soft-rise">
-          <Paper className="app-header" elevation={0}>
+      <Box className="dashboard-page">
+        <Container maxWidth="xl" className="fade-in-up">
+          <Paper className="dashboard-header" elevation={0}>
             <Stack
               direction={{ xs: 'column', md: 'row' }}
               spacing={2}
@@ -1135,11 +1527,11 @@ function App() {
               justifyContent="space-between"
             >
               <Stack direction="row" spacing={1.5} alignItems="center">
-                <Box className="header-mark">
+                <Box className="dashboard-logo-badge">
                   <AnalyticsRoundedIcon />
                 </Box>
                 <Box>
-                  <Typography variant="h3" className="page-title">
+                  <Typography variant="h3" className="dashboard-title">
                     Course Defaulter Portfolio Dashboard
                   </Typography>
                 </Box>
@@ -1148,15 +1540,15 @@ function App() {
                 label="Excel Portfolio Analytics"
                 color="primary"
                 variant="outlined"
-                className="header-chip"
+                className="dashboard-status-chip"
               />
             </Stack>
           </Paper>
 
-          <Grid container spacing={2.2} mb={2.5}>
+          <Grid container spacing={2.5} mb={3.75}>
             <Grid size={{ xs: 12, md: 4 }}>
-              <Paper className="upload-card upload-card--current" elevation={0}>
-                <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1.4}>
+              <Paper className="file-upload-card file-upload-card--current-courses" elevation={0}>
+                <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1.5}>
                   <Typography variant="h6">Current Data</Typography>
                   <Chip
                     size="small"
@@ -1165,7 +1557,7 @@ function App() {
                     variant="outlined"
                   />
                 </Stack>
-                <Stack spacing={1.3}>
+                <Stack spacing={1.5}>
                   {COURSES.map((course) => (
                     <Button
                       key={`current-${course.key}`}
@@ -1179,8 +1571,8 @@ function App() {
                           <UploadFileRoundedIcon />
                         )
                       }
-                      className={`file-button ${
-                        currentFiles[course.key] ? 'file-button--selected' : ''
+                      className={`file-select-button ${
+                        currentFiles[course.key] ? 'file-select-button--has-file' : ''
                       }`}
                       sx={{ justifyContent: 'space-between' }}
                     >
@@ -1210,8 +1602,8 @@ function App() {
             </Grid>
 
             <Grid size={{ xs: 12, md: 4 }}>
-              <Paper className="upload-card upload-card--previous" elevation={0}>
-                <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1.4}>
+              <Paper className="file-upload-card file-upload-card--previous-courses" elevation={0}>
+                <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1.5}>
                   <Typography variant="h6">Previous Data</Typography>
                   <Chip
                     size="small"
@@ -1220,7 +1612,7 @@ function App() {
                     variant="outlined"
                   />
                 </Stack>
-                <Stack spacing={1.3}>
+                <Stack spacing={1.5}>
                   {COURSES.map((course) => (
                     <Button
                       key={`previous-${course.key}`}
@@ -1234,8 +1626,8 @@ function App() {
                           <UploadFileRoundedIcon />
                         )
                       }
-                      className={`file-button ${
-                        previousFiles[course.key] ? 'file-button--selected' : ''
+                      className={`file-select-button ${
+                        previousFiles[course.key] ? 'file-select-button--has-file' : ''
                       }`}
                       sx={{ justifyContent: 'space-between' }}
                     >
@@ -1265,9 +1657,9 @@ function App() {
             </Grid>
 
             <Grid size={{ xs: 12, md: 4 }}>
-              <Paper className="upload-card upload-card--hc" elevation={0}>
-                <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1.4}>
-                  <Typography variant="h6">HC Count</Typography>
+              <Paper className="file-upload-card file-upload-card--headcount" elevation={0}>
+                <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1.5}>
+                  <Typography variant="h6">Headcount</Typography>
                   <Chip
                     size="small"
                     label={`${Number(Boolean(hcFiles.current)) + Number(Boolean(hcFiles.previous))}/2`}
@@ -1276,7 +1668,7 @@ function App() {
                   />
                 </Stack>
 
-                <Stack spacing={1.3}>
+                <Stack spacing={1.5}>
                   <Button
                     variant="outlined"
                     component="label"
@@ -1284,10 +1676,10 @@ function App() {
                     startIcon={
                       hcFiles.current ? <CheckCircleRoundedIcon /> : <UploadFileRoundedIcon />
                     }
-                    className={`file-button ${hcFiles.current ? 'file-button--selected' : ''}`}
+                    className={`file-select-button ${hcFiles.current ? 'file-select-button--has-file' : ''}`}
                     sx={{ width: '100%', justifyContent: 'space-between' }}
                   >
-                    <span>HC Count (Current)</span>
+                    <span>Headcount (Current)</span>
                     <Chip
                       size="small"
                       label={hcFiles.current ? 'Ready' : 'Required'}
@@ -1310,10 +1702,10 @@ function App() {
                     startIcon={
                       hcFiles.previous ? <CheckCircleRoundedIcon /> : <UploadFileRoundedIcon />
                     }
-                    className={`file-button ${hcFiles.previous ? 'file-button--selected' : ''}`}
+                    className={`file-select-button ${hcFiles.previous ? 'file-select-button--has-file' : ''}`}
                     sx={{ width: '100%', justifyContent: 'space-between' }}
                   >
-                    <span>HC Count (Previous)</span>
+                    <span>Headcount (Previous)</span>
                     <Chip
                       size="small"
                       label={hcFiles.previous ? 'Ready' : 'Optional'}
@@ -1331,16 +1723,16 @@ function App() {
                   </Button>
                 </Stack>
 
-                <Box sx={{ mt: 1.5 }}>
+                <Box sx={{ mt: 2 }}>
                   <Typography variant="body2" color="text.secondary">
-                    Current HC: {hcFiles.current ? hcFiles.current.name : 'Not selected'}
+                    Current Headcount: {hcFiles.current ? hcFiles.current.name : 'Not selected'}
                   </Typography>
                   <Typography variant="body2" color="text.secondary">
-                    Previous HC: {hcFiles.previous ? hcFiles.previous.name : 'Not selected'}
+                    Previous Headcount: {hcFiles.previous ? hcFiles.previous.name : 'Not selected'}
                   </Typography>
                 </Box>
 
-                <Divider sx={{ my: 1.6 }} />
+                <Divider sx={{ my: 2 }} />
 
                 <Stack direction="row" spacing={1.2}>
                   <Button
@@ -1371,36 +1763,51 @@ function App() {
           )}
 
           {dashboardData && (
-            <Stack spacing={2.4} className="soft-rise">
-              <Grid container spacing={1.6}>
+            <Stack spacing={3} className="fade-in-up" sx={{ mt: '30px' }}>
+              <Grid container spacing={2}>
                 <Grid size={{ xs: 12, sm: 6, lg: 2.4 }}>
-                  <Paper className="metric-card" elevation={0}>
+                  <Paper
+                    className="summary-tile summary-tile--clickable summary-tile--teal-clickable"
+                    elevation={0}
+                    onClick={() => {
+                      setPortfolioDialogPeriod('current')
+                      setPortfolioDialogOpen(true)
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        setPortfolioDialogPeriod('current')
+                        setPortfolioDialogOpen(true)
+                      }
+                    }}
+                  >
                     <Stack direction="row" alignItems="center" justifyContent="space-between">
                       <Box>
                         <Typography color="text.secondary">Defaulter Portfolios</Typography>
                         <Typography variant="h6">{stats.portfolios}</Typography>
                       </Box>
-                      <Box className="metric-icon metric-icon--teal">
+                      <Box className="summary-tile-icon summary-tile-icon--teal">
                         <BusinessCenterRoundedIcon fontSize="small" />
                       </Box>
                     </Stack>
                   </Paper>
                 </Grid>
                 <Grid size={{ xs: 12, sm: 6, lg: 2.4 }}>
-                  <Paper className="metric-card" elevation={0}>
+                  <Paper className="summary-tile" elevation={0}>
                     <Stack direction="row" alignItems="center" justifyContent="space-between">
                       <Box>
-                        <Typography color="text.secondary">HC Employees</Typography>
+                        <Typography color="text.secondary">Headcount Employees</Typography>
                         <Typography variant="h6">{stats.employees}</Typography>
                       </Box>
-                      <Box className="metric-icon metric-icon--blue">
+                      <Box className="summary-tile-icon summary-tile-icon--blue">
                         <GroupsRoundedIcon fontSize="small" />
                       </Box>
                     </Stack>
                   </Paper>
                 </Grid>
                 <Grid size={{ xs: 12, sm: 6, lg: 2.4 }}>
-                  <Paper className="metric-card" elevation={0}>
+                  <Paper className="summary-tile" elevation={0}>
                     <Stack direction="row" alignItems="center" justifyContent="space-between">
                       <Box>
                         <Typography color="text.secondary">
@@ -1408,33 +1815,48 @@ function App() {
                         </Typography>
                         <Typography variant="h6">{stats.defaultersNow}</Typography>
                       </Box>
-                      <Box className="metric-icon metric-icon--amber">
+                      <Box className="summary-tile-icon summary-tile-icon--amber">
                         <InsightsRoundedIcon fontSize="small" />
                       </Box>
                     </Stack>
                   </Paper>
                 </Grid>
                 <Grid size={{ xs: 12, sm: 6, lg: 2.4 }}>
-                  <Paper className="metric-card metric-card--warning" elevation={0}>
+                  <Paper
+                    className="summary-tile summary-tile--warning summary-tile--clickable"
+                    elevation={0}
+                    onClick={() => {
+                      setMissingHcDialogPeriod('current')
+                      setMissingHcDialogOpen(true)
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        setMissingHcDialogPeriod('current')
+                        setMissingHcDialogOpen(true)
+                      }
+                    }}
+                  >
                     <Stack direction="row" alignItems="center" justifyContent="space-between">
                       <Box>
-                        <Typography color="text.secondary">Missing From HC</Typography>
+                        <Typography color="text.secondary">Missing From Headcount</Typography>
                         <Typography variant="h6">{stats.missingFromHc.total}</Typography>
                         <Typography variant="caption" color="text.secondary">
-                          Curr {stats.missingFromHc.current}
+                          Current {stats.missingFromHc.current}
                           {dashboardData.hasPrevious
-                            ? ` / Prev ${stats.missingFromHc.previous}`
+                            ? ` / Previous ${stats.missingFromHc.previous}`
                             : ''}
                         </Typography>
                       </Box>
-                      <Box className="metric-icon metric-icon--orange">
+                      <Box className="summary-tile-icon summary-tile-icon--orange">
                         <ReportProblemRoundedIcon fontSize="small" />
                       </Box>
                     </Stack>
                   </Paper>
                 </Grid>
                 <Grid size={{ xs: 12, sm: 6, lg: 2.4 }}>
-                  <Paper className="metric-card" elevation={0}>
+                  <Paper className="summary-tile" elevation={0}>
                     <Stack direction="row" alignItems="center" justifyContent="space-between">
                       <Box>
                         <Typography color="text.secondary">Mode</Typography>
@@ -1444,7 +1866,7 @@ function App() {
                             : 'Current only'}
                         </Typography>
                       </Box>
-                      <Box className="metric-icon metric-icon--slate">
+                      <Box className="summary-tile-icon summary-tile-icon--slate">
                         <AnalyticsRoundedIcon fontSize="small" />
                       </Box>
                     </Stack>
@@ -1452,7 +1874,7 @@ function App() {
                 </Grid>
               </Grid>
 
-              <Paper className="toolbar-card" elevation={0}>
+              <Paper className="controls-toolbar" elevation={0}>
                 <Stack
                   direction={{ xs: 'column', md: 'row' }}
                   spacing={1.2}
@@ -1490,18 +1912,28 @@ function App() {
                     </FormControl>
                   </Stack>
 
-                  <Button
-                    variant="contained"
-                    color="secondary"
-                    onClick={exportDashboard}
-                    startIcon={<FileDownloadRoundedIcon />}
-                  >
-                    Export to Excel
-                  </Button>
+                  <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.2}>
+                    <Button
+                      variant="contained"
+                      color="secondary"
+                      onClick={exportDashboard}
+                      startIcon={<FileDownloadRoundedIcon />}
+                    >
+                      Export Matrix
+                    </Button>
+                    <Button
+                      variant="outlined"
+                      color="secondary"
+                      onClick={exportPortfolioSummary}
+                      startIcon={<FileDownloadRoundedIcon />}
+                    >
+                      Export Summary
+                    </Button>
+                  </Stack>
                 </Stack>
               </Paper>
 
-              <Paper className="lookup-card" elevation={0}>
+              <Paper className="employee-lookup-panel" elevation={0}>
                 <Stack
                   direction={{ xs: 'column', md: 'row' }}
                   spacing={1.4}
@@ -1568,15 +2000,43 @@ function App() {
                 </Stack>
               </Paper>
 
-              <Paper className="table-card" elevation={0}>
-                <Typography variant="h6" mb={1}>
-                  Portfolio Defaulter Matrix
-                </Typography>
+              <Paper className="data-table-panel" elevation={0}>
+                <Stack
+                  direction={{ xs: 'column', sm: 'row' }}
+                  spacing={1.5}
+                  justifyContent="space-between"
+                  alignItems={{ xs: 'flex-start', sm: 'center' }}
+                  mb={1.5}
+                >
+                  <Typography variant="h6">
+                    {portfolioViewMode === 'matrix'
+                      ? 'Portfolio Defaulter Matrix'
+                      : 'Portfolio Defaulter Summary'}
+                  </Typography>
+                  <Stack direction="row" spacing={1}>
+                    <Chip
+                      label="Matrix"
+                      color={portfolioViewMode === 'matrix' ? 'primary' : 'default'}
+                      variant={portfolioViewMode === 'matrix' ? 'filled' : 'outlined'}
+                      onClick={() => setPortfolioViewMode('matrix')}
+                      clickable
+                    />
+                    <Chip
+                      label="Summary"
+                      color={portfolioViewMode === 'summary' ? 'primary' : 'default'}
+                      variant={portfolioViewMode === 'summary' ? 'filled' : 'outlined'}
+                      onClick={() => setPortfolioViewMode('summary')}
+                      clickable
+                    />
+                  </Stack>
+                </Stack>
 
+                {portfolioViewMode === 'matrix' ? (
                 <TableContainer>
                   <Table size="small" stickyHeader>
                     <TableHead>
                       <TableRow>
+                        <TableCell>Off Do</TableCell>
                         <TableCell>Portfolio</TableCell>
                         {COURSES.map((course) => (
                           <Fragment key={`${course.key}-headers`}>
@@ -1591,9 +2051,38 @@ function App() {
                       </TableRow>
                     </TableHead>
                     <TableBody>
-                      {filteredPortfolioRows.map((row) => (
+                      {offDoGroupInfo.map(({ row, isFirstInGroup, groupSize }) => (
                         <TableRow key={row.portfolio} hover>
-                          <TableCell sx={{ fontWeight: 700 }}>{row.portfolio}</TableCell>
+                          {isFirstInGroup && (
+                            <TableCell
+                              rowSpan={groupSize}
+                              sx={{
+                                fontWeight: 700,
+                                verticalAlign: 'top',
+                                backgroundColor: 'rgba(15, 118, 110, 0.06)',
+                                borderRight: '1px solid rgba(0,0,0,0.08)',
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {row.offDo || '-'}
+                            </TableCell>
+                          )}
+                          <TableCell
+                            sx={{
+                              fontWeight: 700,
+                              cursor: 'pointer',
+                              color: activePortfolioForEmployees === row.portfolio
+                                ? 'primary.main'
+                                : 'text.primary',
+                              textDecoration:
+                                activePortfolioForEmployees === row.portfolio
+                                  ? 'underline'
+                                  : 'none',
+                            }}
+                            onClick={() => setActivePortfolioForEmployees(row.portfolio)}
+                          >
+                            {row.portfolio}
+                          </TableCell>
 
                           {COURSES.map((course) => {
                             const previousValue = row.counts[course.key].previous
@@ -1635,23 +2124,178 @@ function App() {
                     </TableBody>
                   </Table>
                 </TableContainer>
+                ) : (
+                <TableContainer>
+                  <Table size="small" stickyHeader>
+                    <TableHead>
+                      <TableRow>
+                        <TableCell>Off Do</TableCell>
+                        <TableCell>Portfolio</TableCell>
+                        {dashboardData.hasPrevious && (
+                          <>
+                            <TableCell align="right">Total Employees (Prev)</TableCell>
+                            <TableCell align="right">Total Employees (Curr)</TableCell>
+                            <TableCell align="right">Total Defaulters (Prev)</TableCell>
+                            <TableCell align="right">Total Defaulters (Curr)</TableCell>
+                            <TableCell align="right">Defaulter % (Prev)</TableCell>
+                            <TableCell align="right">Defaulter % (Curr)</TableCell>
+                          </>
+                        )}
+                        {!dashboardData.hasPrevious && (
+                          <>
+                            <TableCell align="right">Total Employees</TableCell>
+                            <TableCell align="right">Total Defaulters</TableCell>
+                            <TableCell align="right">Defaulter %</TableCell>
+                          </>
+                        )}
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {portfolioSummaryRows.map((row, index) => {
+                        const groupMeta = offDoGroupInfo[index]
+                        const percentStyles = buildDeltaStyles(
+                          row.previousPercent,
+                          row.currentPercent,
+                        )
+                        const defaulterStyles = buildDeltaStyles(
+                          row.previousDefaulters,
+                          row.currentDefaulters,
+                        )
+
+                        return (
+                          <TableRow key={row.portfolio} hover>
+                            {groupMeta?.isFirstInGroup && (
+                              <TableCell
+                                rowSpan={groupMeta.groupSize}
+                                sx={{
+                                  fontWeight: 700,
+                                  verticalAlign: 'top',
+                                  backgroundColor: 'rgba(15, 118, 110, 0.06)',
+                                  borderRight: '1px solid rgba(0,0,0,0.08)',
+                                  whiteSpace: 'nowrap',
+                                }}
+                              >
+                                {row.offDo || '-'}
+                              </TableCell>
+                            )}
+                            <TableCell
+                              sx={{
+                                fontWeight: 700,
+                                cursor: 'pointer',
+                                color:
+                                  activePortfolioForEmployees === row.portfolio
+                                    ? 'primary.main'
+                                    : 'text.primary',
+                                textDecoration:
+                                  activePortfolioForEmployees === row.portfolio
+                                    ? 'underline'
+                                    : 'none',
+                              }}
+                              onClick={() =>
+                                setActivePortfolioForEmployees(row.portfolio)
+                              }
+                            >
+                              {row.portfolio}
+                            </TableCell>
+
+                            {dashboardData.hasPrevious ? (
+                              <>
+                                <TableCell align="right">
+                                  {row.previousTotal === null ? '-' : row.previousTotal}
+                                </TableCell>
+                                <TableCell align="right" sx={{ fontWeight: 600 }}>
+                                  {row.currentTotal}
+                                </TableCell>
+                                <TableCell align="right">
+                                  {row.previousDefaulters === null
+                                    ? '-'
+                                    : row.previousDefaulters}
+                                </TableCell>
+                                <TableCell
+                                  align="right"
+                                  sx={{
+                                    color: defaulterStyles.color,
+                                    fontWeight: defaulterStyles.weight,
+                                  }}
+                                >
+                                  {row.currentDefaulters}
+                                  {defaulterStyles.trend &&
+                                    defaulterStyles.trend !== '0' && (
+                                      <Typography
+                                        component="span"
+                                        sx={{
+                                          ml: 0.8,
+                                          fontSize: '0.75rem',
+                                          color: defaulterStyles.color,
+                                        }}
+                                      >
+                                        ({defaulterStyles.trend})
+                                      </Typography>
+                                    )}
+                                </TableCell>
+                                <TableCell align="right">
+                                  {row.previousPercent === null
+                                    ? '-'
+                                    : `${row.previousPercent.toFixed(2)}%`}
+                                </TableCell>
+                                <TableCell
+                                  align="right"
+                                  sx={{
+                                    color: percentStyles.color,
+                                    fontWeight: percentStyles.weight,
+                                  }}
+                                >
+                                  {`${row.currentPercent.toFixed(2)}%`}
+                                </TableCell>
+                              </>
+                            ) : (
+                              <>
+                                <TableCell align="right" sx={{ fontWeight: 600 }}>
+                                  {row.currentTotal}
+                                </TableCell>
+                                <TableCell align="right" sx={{ fontWeight: 600 }}>
+                                  {row.currentDefaulters}
+                                </TableCell>
+                                <TableCell align="right" sx={{ fontWeight: 600 }}>
+                                  {`${row.currentPercent.toFixed(2)}%`}
+                                </TableCell>
+                              </>
+                            )}
+                          </TableRow>
+                        )
+                      })}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+                )}
               </Paper>
 
-              <Paper className="table-card" elevation={0}>
+              <Paper className="data-table-panel" elevation={0}>
                 <Stack
                   direction={{ xs: 'column', md: 'row' }}
-                  spacing={0.8}
+                  spacing={1.5}
                   justifyContent="space-between"
                   alignItems={{ xs: 'flex-start', md: 'center' }}
-                  mb={1}
+                  mb={1.5}
                 >
-                  <Typography variant="h6">Employee Search Results</Typography>
+                  <Typography variant="h6">
+                    {activePortfolioForEmployees
+                      ? `${activePortfolioForEmployees} - Employee Details`
+                      : 'Portfolio Employee Details'}
+                  </Typography>
                   <Typography variant="body2" color="text.secondary">
-                    Showing {filteredEmployeeRows.length}
-                    {hasMoreSearchResults ? ' (limited for performance)' : ''}
+                    {activePortfolioForEmployees
+                      ? `Showing ${portfolioEmployeeRows.length} employee(s)`
+                      : 'Click a portfolio in the matrix to view employees'}
                   </Typography>
                 </Stack>
 
+                {!activePortfolioForEmployees ? (
+                  <Typography color="text.secondary" sx={{ py: 2 }}>
+                    Select any portfolio name in the "Portfolio Defaulter Matrix" table above to
+                    load employee-wise defaulter details.
+                  </Typography>
+                ) : (
                 <TableContainer>
                   <Table size="small" stickyHeader>
                     <TableHead>
@@ -1669,7 +2313,7 @@ function App() {
                       </TableRow>
                     </TableHead>
                     <TableBody>
-                      {filteredEmployeeRows.map((employee) => (
+                      {portfolioEmployeeRows.map((employee) => (
                         <TableRow key={employee.employeeId}>
                           <TableCell>{employee.employeeId}</TableCell>
                           <TableCell>{employee.employeeName || '-'}</TableCell>
@@ -1731,10 +2375,235 @@ function App() {
                     </TableBody>
                   </Table>
                 </TableContainer>
+                )}
               </Paper>
             </Stack>
           )}
         </Container>
+
+        {dashboardData && (
+          <Dialog
+            open={missingHcDialogOpen}
+            onClose={() => setMissingHcDialogOpen(false)}
+            maxWidth="sm"
+            fullWidth
+            PaperProps={{ sx: { borderRadius: 3 } }}
+          >
+            <DialogTitle>
+              <Stack direction="row" alignItems="center" justifyContent="space-between">
+                <Stack direction="row" spacing={1.2} alignItems="center">
+                  <ReportProblemRoundedIcon color="warning" />
+                  <Typography variant="h6">Missing From Headcount</Typography>
+                </Stack>
+                <IconButton size="small" onClick={() => setMissingHcDialogOpen(false)}>
+                  <CloseRoundedIcon fontSize="small" />
+                </IconButton>
+              </Stack>
+            </DialogTitle>
+
+            <DialogContent dividers>
+              {dashboardData.hasPrevious && (
+                <Stack direction="row" spacing={1} mb={2}>
+                  <Chip
+                    label={`Current (${dashboardData.missingFromHc.currentIds.length})`}
+                    color={missingHcDialogPeriod === 'current' ? 'warning' : 'default'}
+                    variant={missingHcDialogPeriod === 'current' ? 'filled' : 'outlined'}
+                    onClick={() => setMissingHcDialogPeriod('current')}
+                    clickable
+                  />
+                  <Chip
+                    label={`Previous (${dashboardData.missingFromHc.previousIds.length})`}
+                    color={missingHcDialogPeriod === 'previous' ? 'secondary' : 'default'}
+                    variant={missingHcDialogPeriod === 'previous' ? 'filled' : 'outlined'}
+                    onClick={() => setMissingHcDialogPeriod('previous')}
+                    clickable
+                  />
+                </Stack>
+              )}
+
+              {(() => {
+                const ids =
+                  missingHcDialogPeriod === 'current'
+                    ? dashboardData.missingFromHc.currentIds
+                    : dashboardData.missingFromHc.previousIds
+
+                if (!ids.length) {
+                  return (
+                    <Typography color="text.secondary" sx={{ py: 2, textAlign: 'center' }}>
+                      No employees missing from Headcount for this period.
+                    </Typography>
+                  )
+                }
+
+                return (
+                  <>
+                    <Typography variant="body2" color="text.secondary" mb={1.5}>
+                      {ids.length} employee{ids.length !== 1 ? 's' : ''} found in course files but
+                      not in the Headcount file.
+                    </Typography>
+                    <TableContainer sx={{ maxHeight: 420 }}>
+                      <Table size="small" stickyHeader>
+                        <TableHead>
+                          <TableRow>
+                            <TableCell>#</TableCell>
+                            <TableCell>Employee ID</TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {ids.map((id, index) => (
+                            <TableRow key={id} hover>
+                              <TableCell sx={{ color: 'text.secondary', width: 48 }}>
+                                {index + 1}
+                              </TableCell>
+                              <TableCell sx={{ fontWeight: 600, fontFamily: 'monospace' }}>
+                                {id}
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </TableContainer>
+                  </>
+                )
+              })()}
+            </DialogContent>
+          </Dialog>
+        )}
+
+        {dashboardData && (
+          <Dialog
+            open={portfolioDialogOpen}
+            onClose={() => setPortfolioDialogOpen(false)}
+            maxWidth="md"
+            fullWidth
+            PaperProps={{ sx: { borderRadius: 3 } }}
+          >
+            <DialogTitle>
+              <Stack direction="row" alignItems="center" justifyContent="space-between">
+                <Stack direction="row" spacing={1.2} alignItems="center">
+                  <BusinessCenterRoundedIcon color="primary" />
+                  <Typography variant="h6">Defaulter Count by Portfolio</Typography>
+                </Stack>
+                <IconButton size="small" onClick={() => setPortfolioDialogOpen(false)}>
+                  <CloseRoundedIcon fontSize="small" />
+                </IconButton>
+              </Stack>
+            </DialogTitle>
+
+            <DialogContent dividers>
+              {dashboardData.hasPrevious && (
+                <Stack direction="row" spacing={1} mb={2}>
+                  <Chip
+                    label="Current"
+                    color={portfolioDialogPeriod === 'current' ? 'primary' : 'default'}
+                    variant={portfolioDialogPeriod === 'current' ? 'filled' : 'outlined'}
+                    onClick={() => setPortfolioDialogPeriod('current')}
+                    clickable
+                  />
+                  <Chip
+                    label="Previous"
+                    color={portfolioDialogPeriod === 'previous' ? 'secondary' : 'default'}
+                    variant={portfolioDialogPeriod === 'previous' ? 'filled' : 'outlined'}
+                    onClick={() => setPortfolioDialogPeriod('previous')}
+                    clickable
+                  />
+                </Stack>
+              )}
+
+              {(() => {
+                const period = portfolioDialogPeriod
+                const rows = dashboardData.portfolioRows
+                  .map((row) => {
+                    const total = COURSES.reduce((sum, course) => {
+                      const val = row.counts[course.key][period]
+                      return sum + (typeof val === 'number' ? val : 0)
+                    }, 0)
+                    const perCourse = COURSES.map((course) => ({
+                      label: course.label,
+                      count: row.counts[course.key][period],
+                    }))
+                    return { portfolio: row.portfolio, total, perCourse }
+                  })
+                  .filter((r) => r.total > 0)
+                  .sort((a, b) => b.total - a.total)
+
+                if (!rows.length) {
+                  return (
+                    <Typography color="text.secondary" sx={{ py: 2, textAlign: 'center' }}>
+                      No defaulters found for this period.
+                    </Typography>
+                  )
+                }
+
+                const grandTotal = rows.reduce((s, r) => s + r.total, 0)
+
+                return (
+                  <>
+                    <Typography variant="body2" color="text.secondary" mb={1.5}>
+                      {rows.length} portfolios with defaulters — {grandTotal} total defaulters
+                    </Typography>
+                    <TableContainer sx={{ maxHeight: 480 }}>
+                      <Table size="small" stickyHeader>
+                        <TableHead>
+                          <TableRow>
+                            <TableCell>#</TableCell>
+                            <TableCell>Portfolio</TableCell>
+                            {COURSES.map((course) => (
+                              <TableCell key={course.key} align="right">
+                                {course.label}
+                              </TableCell>
+                            ))}
+                            <TableCell align="right" sx={{ fontWeight: 700 }}>
+                              Total
+                            </TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {rows.map((row, index) => (
+                            <TableRow key={row.portfolio} hover>
+                              <TableCell sx={{ color: 'text.secondary', width: 40 }}>
+                                {index + 1}
+                              </TableCell>
+                              <TableCell sx={{ fontWeight: 700 }}>
+                                {row.portfolio}
+                              </TableCell>
+                              {row.perCourse.map((c) => (
+                                <TableCell key={c.label} align="right">
+                                  {c.count === null ? (
+                                    <Typography variant="caption" color="text.disabled">—</Typography>
+                                  ) : c.count > 0 ? (
+                                    <Chip
+                                      label={c.count}
+                                      size="small"
+                                      color="error"
+                                      variant="filled"
+                                      sx={{ fontWeight: 700, minWidth: 36 }}
+                                    />
+                                  ) : (
+                                    <Typography variant="caption" color="success.main" sx={{ fontWeight: 600 }}>0</Typography>
+                                  )}
+                                </TableCell>
+                              ))}
+                              <TableCell align="right">
+                                <Chip
+                                  label={row.total}
+                                  size="small"
+                                  color="error"
+                                  variant="outlined"
+                                  sx={{ fontWeight: 700, minWidth: 40 }}
+                                />
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </TableContainer>
+                  </>
+                )
+              })()}
+            </DialogContent>
+          </Dialog>
+        )}
       </Box>
     </ThemeProvider>
   )
