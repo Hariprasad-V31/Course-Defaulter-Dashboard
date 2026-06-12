@@ -9,7 +9,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "predeploy": "npm run build",
-    "deploy": "gh-pages -d dist"
+    "deploy": "gh-pages -d dist -r https://github.com/Hariprasad-V31/Course-Defaulter-Dashboard.git"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",
