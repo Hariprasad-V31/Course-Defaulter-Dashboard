@@ -308,6 +308,26 @@ function normalizePortfolioName(value) {
     return 'BPS'
   }
 
+  // Data + Cybersecurity -> "Data and Cybersecurity"
+  if (
+    compact === 'data' ||
+    compact === 'cybersecurity' ||
+    compact === 'cybersecurityandata' ||
+    compact === 'dataandcybersecurity'
+  ) {
+    return 'Data and Cybersecurity'
+  }
+
+  // Customer + Customer O&O -> "Customer/Customer O&O"
+  if (
+    compact === 'customer' ||
+    compact === 'customeroando' ||
+    compact === 'customerooando' ||
+    compact === 'customeroo'
+  ) {
+    return 'Customer/Customer O&O'
+  }
+
   return portfolio
 }
 
@@ -638,13 +658,19 @@ async function parseHcMap(file, label) {
       return map
     }
 
+    const offDo = hcOffDoHeader ? normalizeCellValue(row[hcOffDoHeader]) : ''
+
+    // Any portfolio whose Off Do is Lokesh is rolled up into "Infra".
+    const isUnderLokesh = /\blokesh\b/i.test(offDo)
+    const portfolio = isUnderLokesh
+      ? 'Infra'
+      : normalizePortfolioName(row[hcPortfolioHeader])
+
     map[employeeId] = {
-      portfolio: normalizePortfolioName(row[hcPortfolioHeader]),
+      portfolio,
       employeeName:
         normalizeCellValue(row[hcNameHeader]) || map[employeeId]?.employeeName || '-',
-      offDo: hcOffDoHeader
-        ? normalizeCellValue(row[hcOffDoHeader])
-        : '',
+      offDo,
     }
 
     return map
