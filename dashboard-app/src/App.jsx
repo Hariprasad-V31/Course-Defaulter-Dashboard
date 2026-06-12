@@ -308,23 +308,6 @@ function normalizePortfolioName(value) {
     return 'BPS'
   }
 
-  // Roll these portfolios into "Others"
-  const othersKeys = new Set([
-    'dws',
-    'serviceassurancepractice',
-    'cis',
-    'certificatemanagementassessmentphase',
-    'certificatemgmtassessmentphase',
-    'cybersecurity',
-    'dwa',
-    'operatingsecurelyprogram',
-    'customer',
-    'customeroando', // "Customer O&O"
-  ])
-  if (othersKeys.has(compact)) {
-    return 'Others'
-  }
-
   return portfolio
 }
 
@@ -677,8 +660,6 @@ function buildPortfolioOffDoMap(hcMaps) {
       const portfolio = entry?.portfolio
       const offDo = entry?.offDo
       if (!portfolio || !offDo) return
-      // 'Others' is a catch-all bucket; never assign it an Off Do.
-      if (portfolio === 'Others') return
       if (!result[portfolio]) {
         result[portfolio] = offDo
       }
@@ -870,23 +851,12 @@ function App() {
   const offDoGroupInfo = useMemo(() => {
     const sizes = {}
     filteredPortfolioRows.forEach((row) => {
-      // 'Others' rows always stand alone — never bucketed under any Off Do.
-      if (row.portfolio === 'Others') return
       const key = row.offDo || '-'
       sizes[key] = (sizes[key] || 0) + 1
     })
 
     const seen = new Set()
-    return filteredPortfolioRows.map((row, idx) => {
-      if (row.portfolio === 'Others') {
-        return {
-          row,
-          offDoKey: `__others__${idx}`,
-          isFirstInGroup: true,
-          groupSize: 1,
-        }
-      }
-
+    return filteredPortfolioRows.map((row) => {
       const key = row.offDo || '-'
       const isFirstInGroup = !seen.has(key)
       if (isFirstInGroup) seen.add(key)
