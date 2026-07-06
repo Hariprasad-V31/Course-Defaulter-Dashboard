@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
-import * as XLSX from 'xlsx'
+import ExcelJS from 'exceljs'
 import {
   Alert,
   Box,
@@ -565,21 +565,19 @@ function detectHeaderRowIndex(matrix) {
 
 async function parseRowsFromFile(file) {
   const arrayBuffer = await file.arrayBuffer()
-  const workbook = XLSX.read(arrayBuffer, { type: 'array', cellDates: false })
-  const firstSheetName = workbook.SheetNames[0]
-  if (!firstSheetName) {
+  const workbook = new ExcelJS.Workbook()
+  await workbook.xlsx.load(arrayBuffer)
+  const worksheet = workbook.worksheets[0]
+  if (!worksheet) {
     return []
   }
 
-  const worksheet = workbook.Sheets[firstSheetName]
-
   // Read as a 2D array first so we can locate the real header row even when
   // the sheet starts with title/metadata/filter rows above the table.
-  const matrix = XLSX.utils.sheet_to_json(worksheet, {
-    header: 1,
-    defval: '',
-    raw: false,
-    blankrows: false,
+  const matrix = []
+  worksheet.eachRow((row) => {
+    const rowValues = row.values.slice(1) // exceljs rows are 1-indexed with empty [0]
+    matrix.push(rowValues.map((cell) => (cell == null ? '' : String(cell))))
   })
 
   if (!matrix.length) {
@@ -1341,7 +1339,7 @@ function App() {
     }
   }
 
-  function exportDashboard() {
+  async function exportDashboard() {
     if (!dashboardData?.portfolioRows?.length) {
       setErrorText('Process files first to export dashboard data.')
       return
@@ -1373,13 +1371,20 @@ function App() {
       row.counts.mandatory.current ?? '-',
     ])
 
-    const worksheet = XLSX.utils.aoa_to_sheet([header, ...rows])
-    const workbook = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Defaulter Dashboard')
-    XLSX.writeFile(workbook, `defaulter-dashboard-${Date.now()}.xlsx`)
+    const workbook = new ExcelJS.Workbook()
+    const worksheet = workbook.addWorksheet('Defaulter Dashboard')
+    worksheet.addRows([header, ...rows])
+    const buffer = await workbook.xlsx.writeBuffer()
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `defaulter-dashboard-${Date.now()}.xlsx`
+    a.click()
+    URL.revokeObjectURL(url)
   }
 
-  function exportPortfolioSummary() {
+  async function exportPortfolioSummary() {
     if (!dashboardData?.portfolioRows?.length) {
       setErrorText('Process files first to export dashboard data.')
       return
@@ -1480,10 +1485,17 @@ function App() {
           ],
     )
 
-    const worksheet = XLSX.utils.aoa_to_sheet([header, ...rows])
-    const workbook = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Portfolio Summary')
-    XLSX.writeFile(workbook, `portfolio-defaulter-summary-${Date.now()}.xlsx`)
+    const workbook = new ExcelJS.Workbook()
+    const worksheet = workbook.addWorksheet('Portfolio Summary')
+    worksheet.addRows([header, ...rows])
+    const buffer = await workbook.xlsx.writeBuffer()
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `portfolio-defaulter-summary-${Date.now()}.xlsx`
+    a.click()
+    URL.revokeObjectURL(url)
   }
 
   const stats = useMemo(() => {
